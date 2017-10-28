@@ -100,11 +100,12 @@ const char * vertexSource = R"(
 	uniform mat4 MVP;			// Model-View-Projection matrix in row-major format
 
 	layout(location = 0) in vec2 vertexPosition;	// Attrib Array 0
-	layout(location = 1) in vec3 vertexColor;	    // Attrib Array 1
-	out vec3 color;									// output attribute
+	layout(location = 1) in vec2 vertexUV;			// Attrib Array 1
+
+	out vec2 texCoord;								// output attribute
 
 	void main() {
-		color = vertexColor;														// copy color from input to output
+		texCoord = vertexUV;														// copy texture coordinates
 		gl_Position = vec4(vertexPosition.x, vertexPosition.y, 0, 1) * MVP; 		// transform to clipping space
 	}
 )";
@@ -114,11 +115,21 @@ const char * fragmentSource = R"(
 	#version 330
     precision highp float;
 
-	in vec3 color;				// variable input: interpolated color of vertex shader
+	uniform sampler2D textureUnit;
+	uniform vec2 texCursor;
+
+	in vec2 texCoord;			// variable input: interpolated texture coordinates
 	out vec4 fragmentColor;		// output that goes to the raster memory as told by glBindFragDataLocation
 
+    vec2 LensDistortion(vec2 p) {
+		const float maxRadius2 = 0.1f; 
+		float radius2 = dot(texCoord - texCursor, texCoord - texCursor);
+		float scale = (radius2 < maxRadius2) ? radius2 / maxRadius2 : 1;
+		return (texCoord - texCursor) * scale + texCursor;
+	}
+
 	void main() {
-		fragmentColor = vec4(color, 1); // extend RGB to RGBA
+		fragmentColor = texture(textureUnit, texCoord);
 	}
 )";
 
@@ -169,6 +180,32 @@ struct vec4 {
 	}
 };
 
+// 3D point in Cartesian coordinates or RGB color
+struct vec3 {
+	float v[3];
+
+	vec3(float x = 0, float y = 0, float z = 0) { v[0] = x; v[1] = y; v[2] = z; }
+	vec3(const vec4& hom) { v[0] = hom.v[0] / hom.v[3]; v[1] = hom.v[1] / hom.v[3]; v[2] = hom.v[2] / hom.v[3]; }
+	vec3 operator*(float s) {
+		vec3 res(v[0] * s, v[1] * s, v[2] * s);
+		return res;
+	}
+};
+
+// 2D point in Cartesian coordinates
+struct vec2 {
+	float v[2];
+
+	vec2(float x = 0, float y = 0) { v[0] = x; v[1] = y; }
+	vec2(const vec4& hom) { v[0] = hom.v[0] / hom.v[3]; v[1] = hom.v[1] / hom.v[3]; }
+	vec2 operator-(vec2& right) {
+		vec2 res(v[0] - right.v[0], v[1] - right.v[1]);
+		return res;
+	}
+	float Length() { return sqrtf(v[0] * v[0] + v[1] * v[1]); }
+};
+
+
 // 2D camera
 struct Camera {
 	float wCx, wCy;	// center in world coordinates
@@ -179,31 +216,31 @@ public:
 	}
 
 	mat4 V() { // view matrix: translates the center to the origin
-		return mat4(1,    0, 0, 0,
-			        0,    1, 0, 0,
-			        0,    0, 1, 0,
-			     -wCx, -wCy, 0, 1);
+		return mat4(1, 0, 0, 0,
+			0, 1, 0, 0,
+			0, 0, 1, 0,
+			-wCx, -wCy, 0, 1);
 	}
 
 	mat4 P() { // projection matrix: scales it to be a square of edge length 2
-		return mat4(2/wWx,    0, 0, 0,
-			        0,    2/wWy, 0, 0,
-			        0,        0, 1, 0,
-			        0,        0, 0, 1);
+		return mat4(2 / wWx, 0, 0, 0,
+			0, 2 / wWy, 0, 0,
+			0, 0, 1, 0,
+			0, 0, 0, 1);
 	}
 
 	mat4 Vinv() { // inverse view matrix
-		return mat4(1,     0, 0, 0,
-				    0,     1, 0, 0,
-			        0,     0, 1, 0,
-			        wCx, wCy, 0, 1);
+		return mat4(1, 0, 0, 0,
+			0, 1, 0, 0,
+			0, 0, 1, 0,
+			wCx, wCy, 0, 1);
 	}
 
 	mat4 Pinv() { // inverse projection matrix
-		return mat4(wWx/2, 0,    0, 0,
-			           0, wWy/2, 0, 0,
-			           0,  0,    1, 0,
-			           0,  0,    0, 1);
+		return mat4(wWx / 2, 0, 0, 0,
+			0, wWy / 2, 0, 0,
+			0, 0, 1, 0,
+			0, 0, 0, 1);
 	}
 
 	void Animate(float t) {
@@ -219,6 +256,83 @@ Camera camera;
 
 // handle of the shader program
 unsigned int shaderProgram;
+
+vec2 texLensPosition(2, 2);
+
+class TextureBackground {
+	unsigned int vao, vbo[2], textureId;	// vertex array object id and texture id
+	vec2 vertices[4], uvs[4];
+public:
+	TextureBackground() {
+		vertices[0] = vec2(-10, -10); uvs[0] = vec2(0, 0);
+		vertices[1] = vec2(10, -10);  uvs[1] = vec2(1, 0);
+		vertices[2] = vec2(10, 10);   uvs[2] = vec2(1, 1);
+		vertices[3] = vec2(-10, 10);  uvs[3] = vec2(0, 1);
+	}
+	void Create() {
+		glGenVertexArrays(1, &vao);	// create 1 vertex array object
+		glBindVertexArray(vao);		// make it active
+
+		glGenBuffers(2, vbo);	// Generate 1 vertex buffer objects
+
+								// vertex coordinates: vbo[0] -> Attrib Array 0 -> vertexPosition of the vertex shader
+		glBindBuffer(GL_ARRAY_BUFFER, vbo[0]); // make it active, it is an array
+		glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_DYNAMIC_DRAW);	   // copy to that part of the memory which is not modified 
+																					   // Map Attribute Array 0 to the current bound vertex buffer (vbo[0])
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);     // stride and offset: it is tightly packed
+
+		glBindBuffer(GL_ARRAY_BUFFER, vbo[1]); // make it active, it is an array
+		glBufferData(GL_ARRAY_BUFFER, sizeof(uvs), uvs, GL_STATIC_DRAW);	   // copy to that part of the memory which is not modified 
+																			   // Map Attribute Array 0 to the current bound vertex buffer (vbo[0])
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, NULL);     // stride and offset: it is tightly packed
+
+		int width = 128, height = 128;
+		vec3 * image = new vec3[width * height];
+		for (int y = 0; y < height; y++) {
+			for (int x = 0; x < width; x++) {
+				//float luminance = ((x / 16) % 2) ^ ((y / 16) % 2);
+				if (x<width / 2 - width / 4 || x>width / 2 + width / 4) {
+					image[y * width + x] = vec3(cosf(2 * 3.14 * x / width), 0, 0);
+				}
+				else
+					image[y * width + x] = vec3(0, -cosf((2 * 3.14 * x / width)), 0);
+			}
+		}
+		// Create objects by setting up their vertex data on the GPU
+		glGenTextures(1, &textureId);  				// id generation
+		glBindTexture(GL_TEXTURE_2D, textureId);    // binding
+
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGB, GL_FLOAT, image); // To GPU
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); // sampling
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	}
+
+
+	void Draw() {
+		glBindVertexArray(vao);	// make the vao and its vbos active playing the role of the data source
+
+		mat4 MVPTransform = camera.V() * camera.P();
+
+		// set GPU uniform matrix variable MVP with the content of CPU variable MVPTransform
+		int location = glGetUniformLocation(shaderProgram, "MVP");
+		if (location >= 0) glUniformMatrix4fv(location, 1, GL_TRUE, MVPTransform); // set uniform variable MVP to the MVPTransform
+		else printf("uniform MVP cannot be set\n");
+
+		location = glGetUniformLocation(shaderProgram, "texCursor");
+		if (location >= 0) glUniform2f(location, texLensPosition.v[0], texLensPosition.v[1]); // set uniform variable MVP to the MVPTransform
+		else printf("texCursor cannot be set\n");
+
+		location = glGetUniformLocation(shaderProgram, "textureUnit");
+		if (location >= 0) {
+			glUniform1i(location, 0);		// texture sampling unit is TEXTURE0
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, textureId);	// connect the texture to the sampler
+		}
+		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);	// draw two triangles forming a quad
+	}
+};
 
 class Triangle {
 	unsigned int vao;	// vertex array object id
@@ -348,14 +462,18 @@ public:
 // The virtual world: collection of two objects
 Triangle triangle;
 LineStrip lineStrip;
+TextureBackground background;
 
 // Initialization, create an OpenGL context
 void onInitialization() {
 	glViewport(0, 0, windowWidth, windowHeight);
 
 	// Create objects by setting up their vertex data on the GPU
-	lineStrip.Create();
-	triangle.Create();
+	//lineStrip.Create();
+	//triangle.Create();
+
+	background.Create();
+
 
 	// Create vertex shader from string
 	unsigned int vertexShader = glCreateShader(GL_VERTEX_SHADER);
@@ -406,8 +524,11 @@ void onDisplay() {
 	glClearColor(0, 0, 0, 0);							// background color 
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); // clear the screen
 
-	triangle.Draw();
-	lineStrip.Draw();
+	//triangle.Draw();
+	//lineStrip.Draw();
+
+	background.Draw();
+
 	glutSwapBuffers();									// exchange the two buffers
 }
 
@@ -437,11 +558,13 @@ void onMouseMotion(int pX, int pY) {
 
 // Idle event indicating that some time elapsed: do animation here
 void onIdle() {
+	/*
 	long time = glutGet(GLUT_ELAPSED_TIME); // elapsed time since the start of the program
 	float sec = time / 1000.0f;				// convert msec to sec
 	camera.Animate(sec);					// animate the camera
-	triangle.Animate(sec);					// animate the triangle object
+	//triangle.Animate(sec);					// animate the triangle object
 	glutPostRedisplay();					// redraw the scene
+	*/
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
