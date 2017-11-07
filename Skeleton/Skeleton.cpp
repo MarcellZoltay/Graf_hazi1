@@ -5,7 +5,7 @@
 // A beadott program csak ebben a fajlban lehet, a fajl 1 byte-os ASCII karaktereket tartalmazhat.
 // Tilos:
 // - mast "beincludolni", illetve mas konyvtarat hasznalni
-// - faljmuveleteket vegezni a printf-et kivéve
+// - faljmuveleteket vegezni a printf-et kiveve
 // - new operatort hivni a lefoglalt adat korrekt felszabaditasa nelkul
 // - felesleges programsorokat a beadott programban hagyni
 // - felesleges kommenteket a beadott programba irni a forrasmegjelolest kommentjeit kiveve
@@ -56,6 +56,8 @@ const unsigned int windowWidth = 600, windowHeight = 600;
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // You are supposed to modify the code from here...
+
+int const R = 2, r = 1;
 
 // OpenGL major and minor versions
 int majorVersion = 3, minorVersion = 3;
@@ -121,13 +123,6 @@ const char * fragmentSource = R"(
 	in vec2 texCoord;			// variable input: interpolated texture coordinates
 	out vec4 fragmentColor;		// output that goes to the raster memory as told by glBindFragDataLocation
 
-    vec2 LensDistortion(vec2 p) {
-		const float maxRadius2 = 0.1f; 
-		float radius2 = dot(texCoord - texCursor, texCoord - texCursor);
-		float scale = (radius2 < maxRadius2) ? radius2 / maxRadius2 : 1;
-		return (texCoord - texCursor) * scale + texCursor;
-	}
-
 	void main() {
 		fragmentColor = texture(textureUnit, texCoord);
 	}
@@ -189,6 +184,12 @@ struct vec3 {
 	vec3 operator*(float s) {
 		vec3 res(v[0] * s, v[1] * s, v[2] * s);
 		return res;
+	}
+
+	void operator+=(const vec3& rhs) {
+		v[0] += rhs.v[0];
+		v[1] += rhs.v[1];
+		v[2] += rhs.v[2];
 	}
 };
 
@@ -257,7 +258,24 @@ Camera camera;
 // handle of the shader program
 unsigned int shaderProgram;
 
-vec2 texLensPosition(2, 2);
+class BezierCurve {
+	std::vector<vec3> cps;	// control points
+
+	float B(int i, float t) {
+		int n = cps.size() - 1; // n deg polynomial = n+1 pts!
+		float choose = 1;
+		for (int j = 1; j <= i; j++) choose *= (float)(n - j + 1) / j;
+		return choose * pow(t, i) * pow(1 - t, n - i);
+	}
+public:
+	void AddControlPoint(vec3 cp) { cps.push_back(cp); }
+
+	vec3 r(float t) {
+		vec3 rr(0, 0);
+		for (int i = 0; i < cps.size(); i++) rr += cps[i] * B(i, t);
+		return rr;
+	}
+};
 
 class TextureBackground {
 	unsigned int vao, vbo[2], textureId;	// vertex array object id and texture id
@@ -292,12 +310,11 @@ public:
 		vec3 * image = new vec3[width * height];
 		for (int y = 0; y < height; y++) {
 			for (int x = 0; x < width; x++) {
-				//float luminance = ((x / 16) % 2) ^ ((y / 16) % 2);
-				if (x<width / 2 - width / 4 || x>width / 2 + width / 4) {
-					image[y * width + x] = vec3(cosf(2 * 3.14 * x / width), 0, 0);
-				}
+				float gauss_curvature = (1 / r)*(cosf((float)(2 * 3.14)*x / width) / R + r*cosf((float)(2 * 3.14)*x / width));
+				if(gauss_curvature > 0)
+					image[y * width + x] = vec3(gauss_curvature/1.5, 0, 0);
 				else
-					image[y * width + x] = vec3(0, -cosf((2 * 3.14 * x / width)), 0);
+					image[y * width + x] = vec3(0, -gauss_curvature/1.5, 0);
 			}
 		}
 		// Create objects by setting up their vertex data on the GPU
@@ -309,7 +326,6 @@ public:
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	}
 
-
 	void Draw() {
 		glBindVertexArray(vao);	// make the vao and its vbos active playing the role of the data source
 
@@ -319,10 +335,6 @@ public:
 		int location = glGetUniformLocation(shaderProgram, "MVP");
 		if (location >= 0) glUniformMatrix4fv(location, 1, GL_TRUE, MVPTransform); // set uniform variable MVP to the MVPTransform
 		else printf("uniform MVP cannot be set\n");
-
-		location = glGetUniformLocation(shaderProgram, "texCursor");
-		if (location >= 0) glUniform2f(location, texLensPosition.v[0], texLensPosition.v[1]); // set uniform variable MVP to the MVPTransform
-		else printf("texCursor cannot be set\n");
 
 		location = glGetUniformLocation(shaderProgram, "textureUnit");
 		if (location >= 0) {
@@ -408,11 +420,42 @@ public:
 
 class LineStrip {
 	GLuint vao, vbo;        // vertex array object, vertex buffer object
-	float  vertexData[100]; // interleaved data of coordinates and colors
+	float  vertexData[8];	// interleaved data of coordinates and colors
+	float  cps[26];			// control points' coordinates
+	float  test[1000];
 	int    nVertices;       // number of vertices
+	int	   nCps;			// number of control points
+	int    nTest;
+	unsigned int textureId;	// 
+
+	void CreateBezierCurve(BezierCurve curve) {
+		vec3 tmp;
+		for (float t = 0.0; t <= 1.0; t += 0.02) {
+			tmp = curve.r(t);
+			test[nTest * 2 + 0] = tmp.v[0];
+			test[nTest * 2 + 1] = tmp.v[1];
+			
+			printf("%d. v: %f, u: %f \t", nTest, test[nTest * 2 + 0], test[nTest * 2 + 1]);
+			printf("[0,1] (u,v): (%f,%f) \n", (test[nTest * 2 + 0]+10)/20, (test[nTest * 2 + 1]+10)/20);
+
+			nTest++;
+		}
+	}
+
+	void DoAlgorithm(BezierCurve curve) {
+		
+	}
+	void Perturb() {
+
+	}
+	void Lenght() {
+
+	}
 public:
 	LineStrip() {
 		nVertices = 0;
+		nCps = 0;
+		nTest = 0;
 	}
 	void Create() {
 		glGenVertexArrays(1, &vao);
@@ -424,25 +467,80 @@ public:
 		glEnableVertexAttribArray(0);  // attribute array 0
 		glEnableVertexAttribArray(1);  // attribute array 1
 		// Map attribute array 0 to the vertex data of the interleaved vbo
-		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(0)); // attribute array, components/attribute, component type, normalize?, stride, offset
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), reinterpret_cast<void*>(0)); // attribute array, components/attribute, component type, normalize?, stride, offset
 		// Map attribute array 1 to the color data of the interleaved vbo
-		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(2 * sizeof(float)));
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 2 * sizeof(float), reinterpret_cast<void*>(2 * sizeof(float)));
+
+
+		int width = 128, height = 128;
+		vec3 * image = new vec3[width * height];
+		for (int y = 0; y < height; y++) {
+			for (int x = 0; x < width; x++) {
+				image[y * width + x] = vec3(1, 1, 1);
+			}
+		}
+		// Create objects by setting up their vertex data on the GPU
+		glGenTextures(1, &textureId);  				// id generation
+		glBindTexture(GL_TEXTURE_2D, textureId);    // binding
+
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGB, GL_FLOAT, image); // To GPU
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); // sampling
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	}
 
 	void AddPoint(float cX, float cY) {
 		glBindBuffer(GL_ARRAY_BUFFER, vbo);
-		if (nVertices >= 20) return;
+		if (nVertices >= 3) {
+			nVertices = 0;
+			nCps = 0;
+			nTest = 0;
+		}
 
 		vec4 wVertex = vec4(cX, cY, 0, 1) * camera.Pinv() * camera.Vinv();
 		// fill interleaved data
-		vertexData[5 * nVertices]     = wVertex.v[0];
-		vertexData[5 * nVertices + 1] = wVertex.v[1];
-		vertexData[5 * nVertices + 2] = 1; // red
-		vertexData[5 * nVertices + 3] = 1; // green
-		vertexData[5 * nVertices + 4] = 0; // blue
+		vertexData[2 * nVertices]     = wVertex.v[0];
+		vertexData[2 * nVertices + 1] = wVertex.v[1];
 		nVertices++;
+
+		if (nVertices == 2) {
+			BezierCurve curveAB;
+			curveAB.AddControlPoint(vec3(vertexData[0 * 2 + 0], vertexData[0 * 2 + 1]));
+			curveAB.AddControlPoint(vec3((float)((vertexData[0 * 2 + 0] + vertexData[1 * 2 + 0])/2 + 2), (float)((vertexData[0 * 2 + 1] + vertexData[1 * 2 + 1])/2)));
+			curveAB.AddControlPoint(vec3(vertexData[1 * 2 + 0], vertexData[1 * 2 + 1]));
+
+			printf("CP_1 \t v: %f, u: %f \n", vertexData[0 * 2 + 0], vertexData[0 * 2 + 1]);
+			printf("CP_2 \t v: %f, u: %f \n", (float)((vertexData[0 * 2 + 0] + vertexData[1 * 2 + 0]) / 2) + 2, (float)((vertexData[0 * 2 + 1] + vertexData[1 * 2 + 1]) / 2) + 2);
+			printf("CP_3 \t v: %f, u: %f \n\n", vertexData[1 * 2 + 0], vertexData[1 * 2 + 1]);
+
+			CreateBezierCurve(curveAB);
+			DoAlgorithm(curveAB);
+		}
+		else if (nVertices == 3) {
+			BezierCurve curveBC;
+			curveBC.AddControlPoint(vec3(vertexData[1 * 2 + 0], vertexData[1 * 2 + 1]));
+			curveBC.AddControlPoint(vec3((float)((vertexData[1 * 2 + 0] + vertexData[2 * 2 + 0]) / 2) + 2, (float)((vertexData[1 * 2 + 1] + vertexData[2 * 2 + 1]) / 2) + 2));
+			curveBC.AddControlPoint(vec3(vertexData[2 * 2 + 0], vertexData[2 * 2 + 1]));
+
+			printf("CP_1 \t v: %f, u: %f \n", vertexData[1 * 2 + 0], vertexData[1 * 2 + 1]);
+			printf("CP_2 \t v: %f, u: %f \n", (float)((vertexData[1 * 2 + 0] + vertexData[2 * 2 + 0]) / 2) + 2, (float)((vertexData[1 * 2 + 1] + vertexData[2 * 2 + 1]) / 2) + 2);
+			printf("CP_3 \t v: %f, u: %f \n\n", vertexData[2 * 2 + 0], vertexData[2 * 2 + 1]);
+
+			CreateBezierCurve(curveBC);
+
+			BezierCurve curveCA;
+			curveCA.AddControlPoint(vec3(vertexData[2 * 2 + 0], vertexData[2 * 2 + 1]));
+			curveCA.AddControlPoint(vec3((float)((vertexData[2 * 2 + 0] + vertexData[0 * 2 + 0]) / 2) + 2, (float)((vertexData[2 * 2 + 1] + vertexData[0 * 2 + 1]) / 2) + 2));
+			curveCA.AddControlPoint(vec3(vertexData[0 * 2 + 0], vertexData[0 * 2 + 1]));
+
+			printf("CP_1 \t v: %f, u: %f \n", vertexData[2 * 2 + 0], vertexData[2 * 2 + 1]);
+			printf("CP_2 \t v: %f, u: %f \n", (float)((vertexData[2 * 2 + 0] + vertexData[0 * 2 + 0]) / 2) + 2, (float)((vertexData[2 * 2 + 1] + vertexData[0 * 2 + 1]) / 2) + 2);
+			printf("CP_3 \t v: %f, u: %f \n\n", vertexData[0 * 2 + 0], vertexData[0 * 2 + 1]);
+
+			CreateBezierCurve(curveCA);
+		}
+		
 		// copy data to the GPU
-		glBufferData(GL_ARRAY_BUFFER, nVertices * 5 * sizeof(float), vertexData, GL_DYNAMIC_DRAW);
+		glBufferData(GL_ARRAY_BUFFER, nTest * 2 * sizeof(float), test, GL_DYNAMIC_DRAW);
 	}
 
 	void Draw() {
@@ -453,8 +551,15 @@ public:
 			if (location >= 0) glUniformMatrix4fv(location, 1, GL_TRUE, VPTransform);
 			else printf("uniform MVP cannot be set\n");
 
+			location = glGetUniformLocation(shaderProgram, "textureUnit");
+			if (location >= 0) {
+				glUniform1i(location, 0);		// texture sampling unit is TEXTURE0
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, textureId);	// connect the texture to the sampler
+			}
+
 			glBindVertexArray(vao);
-			glDrawArrays(GL_LINE_STRIP, 0, nVertices);
+			glDrawArrays(GL_LINE_STRIP, 0, nTest);
 		}
 	}
 };
@@ -463,6 +568,7 @@ public:
 Triangle triangle;
 LineStrip lineStrip;
 TextureBackground background;
+
 
 // Initialization, create an OpenGL context
 void onInitialization() {
@@ -473,6 +579,7 @@ void onInitialization() {
 	//triangle.Create();
 
 	background.Create();
+	lineStrip.Create();
 
 
 	// Create vertex shader from string
@@ -528,6 +635,7 @@ void onDisplay() {
 	//lineStrip.Draw();
 
 	background.Draw();
+	lineStrip.Draw();
 
 	glutSwapBuffers();									// exchange the two buffers
 }
@@ -549,6 +657,8 @@ void onMouse(int button, int state, int pX, int pY) {
 		float cY = 1.0f - 2.0f * pY / windowHeight;		// pont transzformálása normalizált koordináta rendszerbe
 		lineStrip.AddPoint(cX, cY);
 		glutPostRedisplay();     // redraw
+
+		/*printf("v: %f, u: %f" "\n", ((float)pX/windowWidth), ((float)pY/windowHeight));*/
 	}
 }
 
